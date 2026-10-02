@@ -1,0 +1,19 @@
+# Kaggle training bundle (not needed to run)
+kaggle_dataset.zip
+kaggle_dataset/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS / logs / temp
+.DS_Store
+logs/
+*.log
+models/**/*_selfplay_tmp.zip
