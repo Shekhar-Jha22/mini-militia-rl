@@ -1,11 +1,11 @@
 import numpy as np
-from stable_baselines3 import PPO as PPOModel
 from observations import to_world_action
 
 class PPOAgent:
     """PPO agent that can load trained models or act randomly as fallback"""
     name = "PPO"
     color = "#22c55e"
+    uses_obs = True
 
     def __init__(self, model=None, deterministic=False, team=0):
         self.model = model
@@ -47,6 +47,7 @@ class PPOAgent:
 
     def load(self, path):
         """Load trained PPO model from path"""
+        from stable_baselines3 import PPO as PPOModel   # training-only dependency
         try:
             self.model = PPOModel.load(path)
             print(f"✓ Loaded PPO model from {path}")

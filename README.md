@@ -1,4 +1,3 @@
-
 # Mini-Militia RL Agent
 
 A reinforcement learning agent trained to play a 2D top-down shooter from scratch,

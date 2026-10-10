@@ -17,3 +17,4 @@ frontend/dist/
 logs/
 *.log
 models/**/*_selfplay_tmp.zip
+data/

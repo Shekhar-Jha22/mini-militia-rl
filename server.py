@@ -1,9 +1,10 @@
-import os
 import json
-import zipfile
+import os
 import numpy as np
-from flask import Flask, request, jsonify
+from flask import Flask, g, request, jsonify, send_from_directory
 from flask_cors import CORS
+from flask_sock import Sock
+from simple_websocket import ConnectionClosed
 
 from env import MiniMilitiaEnv
 from maps import MAPS
@@ -19,23 +20,17 @@ from agents import (
     MAP2_AGENTS,
     STAGE_NAMES,
 )
-from stable_baselines3 import PPO as PPOModel
+from agents.numpy_policy import NumpyPolicy
 from observations import OBS_DIM
 from rewards import REWARDS
+from auth import login_required, register_auth_routes, verify_token
+from matches import TICK_S, Match, MatchManager, match_winner
 
 app = Flask(__name__)
 CORS(app)
-
-
-class GameSession:
-    def __init__(self):
-        self.env = None
-        self.agents = [None, None]
-        self.obs = [None, None]
-        self.done = True
-        self.match_info = {}
-
-session = GameSession()
+register_auth_routes(app)
+sock = Sock(app)
+manager = MatchManager()
 
 AGENT_REGISTRY = {
     "map1": {
@@ -62,36 +57,33 @@ def _ppo_checkpoint(map_id, opponent):
     """Stage checkpoint trained against `opponent`; self-play checkpoint for human/ppo/unknown."""
     d, v = f"models/{map_id}", PPO_VARIATION
     stages = STAGE_NAMES[map_id]
-    selfplay = [f"{d}/final_{v}.zip", f"{d}/{v}_stage_{len(stages) - 1}_final.zip"]
+    selfplay = [f"{d}/final_{v}.npz", f"{d}/{v}_stage_{len(stages) - 1}_final.npz"]
     cands = []
     # "random" is a ~0-2% warm-up stage, so its checkpoint is undertrained → use self-play
     if opponent in stages and opponent not in ("selfplay", "random"):
-        cands.append(f"{d}/{v}_stage_{stages.index(opponent)}_final.zip")
-    cands += selfplay + [f"{d}/{v}_best.zip", f"{d}/best.zip", f"{d}/ppo.zip"]
-    return next((p for p in cands if os.path.exists(p) and _obs_compatible(p)), None)
+        cands.append(f"{d}/{v}_stage_{stages.index(opponent)}_final.npz")
+    cands += selfplay + [f"{d}/{v}_best.npz", f"{d}/best.npz", f"{d}/ppo.npz"]
+    return next((p for p in cands if os.path.exists(p) and _policy(p) is not None), None)
 
 
-def _obs_compatible(path):
-    try:
-        with zipfile.ZipFile(path) as z:
-            shape = json.loads(z.read("data"))["observation_space"]["_shape"]
-    except Exception:
-        return False
-    if list(shape) != [OBS_DIM]:
-        print(f"⚠ skipping {path}: obs {shape} ≠ current {OBS_DIM} (retrain)")
-        return False
-    return True
+def _policy(path):
+    """Load (and cache) a torch-free policy; None if it was trained on a different obs layout."""
+    if path not in _model_cache:
+        pol = NumpyPolicy(path)
+        if pol.obs_dim != OBS_DIM:
+            print(f"⚠ skipping {path}: obs {pol.obs_dim} ≠ current {OBS_DIM} (retrain)")
+            pol = None
+        _model_cache[path] = pol
+    return _model_cache[path]
 
 
 def _load_ppo(map_id, opponent, team):
     agent = PPOAgent(team=team)
     path = _ppo_checkpoint(map_id, _effective_name(opponent, map_id))
     if path is None:
-        print(f"⚠ No PPO checkpoint for {map_id}")
+        print(f"⚠ No PPO checkpoint for {map_id} (run tools/export_policies.py)")
         return agent
-    if path not in _model_cache:
-        _model_cache[path] = PPOModel.load(path)
-    agent.model = _model_cache[path]
+    agent.model = _policy(path)
     print(f"✓ PPO {map_id} vs {opponent}: {path}")
     return agent
 
@@ -123,99 +115,132 @@ def list_maps():
         ]
     })
 
-@app.route("/api/start", methods=["POST"])
-def start_game():
-    data = request.json or {}
-    a0_name = data.get("agent0", "ppo")
-    a1_name = data.get("agent1", "rulebased")
-    map_id = data.get("map_id", "map1")
+def _valid_agents(map_id):
+    return {"random", "ppo", *AGENT_REGISTRY.get(map_id, {})}
 
-    map_cfg = MAPS[map_id]
-    reward_cls = REWARDS[map_id]
 
-    session.env = MiniMilitiaEnv(map_cfg=map_cfg, reward_fn=reward_cls())
-    obs0, _ = session.env.reset()
-    obs1 = session.env._get_obs(1)
+def _owned_match(match_id):
+    m = manager.get(match_id)
+    if m is None:
+        return None, None, (jsonify({"error": "Match not found."}), 404)
+    seat = m.seat_of(g.user["id"])
+    if not m.can_view(g.user["id"]):
+        return None, None, (jsonify({"error": "Not your match."}), 403)
+    return m, seat, None
 
-    session.agents = [
-        _make_agent(a0_name, map_id=map_id, team=0, opponent=a1_name) if a0_name != "human" else None,
-        _make_agent(a1_name, map_id=map_id, team=1, opponent=a0_name),
-    ]
-    session.obs = [obs0, obs1]
-    session.done = False
-    session.match_info = {"agent0": a0_name, "agent1": a1_name, "winner": None, "steps": 0, "map_id": map_id}
 
-    return jsonify({
-        "status": "started",
-        "state": session.env.get_full_state(),
-        "agents": [a0_name, a1_name],
-        "map_id": map_id,
-    })
+@app.post("/api/match/start")
+@login_required
+def start_match():
+    data = request.get_json(silent=True) or {}
+    mode, map_id = data.get("mode"), data.get("map_id", "map1")
+    if map_id not in MAPS:
+        return jsonify({"error": "Unknown map."}), 400
+    valid = _valid_agents(map_id)
+    user = g.user
+    if mode in ("bot", "rl"):
+        opp = "ppo" if mode == "rl" else data.get("opponent", "random")
+        if opp not in valid:
+            return jsonify({"error": "Unknown opponent."}), 400
+        match = Match(mode, map_id, seats=[user["id"], None],
+                      agents=[None, _make_agent(opp, map_id, team=1, opponent="human")],
+                      labels=["human", opp], names=[user["name"], opp])
+        seat = 0
+    elif mode == "sim":
+        a0, a1 = data.get("agent0", "ppo"), data.get("agent1", "random")
+        if a0 not in valid or a1 not in valid:
+            return jsonify({"error": "Unknown agent."}), 400
+        tick_ms = min(max(int(data.get("tick_ms", 80)), 30), 200)
+        match = Match(mode, map_id, seats=[None, None],
+                      agents=[_make_agent(a0, map_id, team=0, opponent=a1),
+                              _make_agent(a1, map_id, team=1, opponent=a0)],
+                      labels=[a0, a1], names=[a0, a1], owner=user["id"], tick_s=tick_ms / 1000)
+        seat = None
+    else:
+        return jsonify({"error": "Unknown mode."}), 400
+    manager.add(match)
+    return jsonify(match.snapshot(seat))
 
-@app.route("/api/step", methods=["POST"])
-def step_game():
-    if session.done or session.env is None:
-        return jsonify({"error": "No active game"}), 400
 
-    data = request.json or {}
-    state = session.env.get_full_state()
+@sock.route("/api/match/<match_id>/ws")
+def match_ws(ws, match_id):
+    """Push a snapshot every tick; receive {"action": [...]}, {"ping": 1} or {"tick_ms": n}.
+    The first client message must be {"token": ...} so credentials never appear in URLs."""
+    try:
+        user = verify_token(json.loads(ws.receive(timeout=10) or "{}").get("token"))
+    except (ValueError, AttributeError, ConnectionClosed):
+        return
+    m = manager.get(match_id)
+    if user is None or m is None or not m.can_view(user["id"]):
+        err = "Please log in again." if user is None else "Match not found." if m is None else "Not your match."
+        ws.send(json.dumps({"error": err}))
+        return
+    seat = m.seat_of(user["id"])
+    seen = -1
+    try:
+        while True:
+            while (raw := ws.receive(timeout=0)) is not None:
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                if seat is not None and "action" in msg:
+                    m.set_input(seat, msg["action"])
+                elif m.kind == "sim" and "tick_ms" in msg:
+                    m.tick_s = min(max(int(msg["tick_ms"]), 30), 200) / 1000
+                m.heartbeat(seat)
+            version = m.wait_for_update(seen, timeout=TICK_S * 2)
+            if version != seen:
+                seen = version
+                snap = m.snapshot(seat)
+                ws.send(json.dumps(snap, separators=(",", ":")))
+                if snap["done"]:
+                    break
+    except ConnectionClosed:
+        pass
 
-    actions = []
-    for i, agent in enumerate(session.agents):
-        if agent is None:
-            raw = data.get("human_action", [0, 0, 0])
-            actions.append(np.array(raw, dtype=np.int64))
-        else:
-            # actions.append(agent.get_action(session.obs[i], state))
-            # print(f"DEBUG: Calling get_action for agent {i}, state type: {type(state)}")
-            try:
-                action = agent.get_action(session.obs[i], state)
-                # print(f"DEBUG: Got action: {action}")
-                actions.append(action)
-            except Exception as e:
-                print(f"ERROR: Agent {i} failed: {e}")
-                actions.append(np.array([0, 0, 0], dtype=np.int64))
-                
-                
-    obs0, reward, terminated, truncated, info = session.env.step(actions)
-    session.obs[0] = obs0
-    session.obs[1] = session.env._get_obs(1)
-    session.done = terminated or truncated
 
-    if session.done:
-        session.match_info["winner"] = _match_winner(
-            info, session.match_info["agent0"], session.match_info["agent1"])
-        session.match_info["steps"] = info["step"]
+@app.post("/api/match/<match_id>/leave")
+@login_required
+def leave_match(match_id):
+    m, seat, err = _owned_match(match_id)
+    if err:
+        return err
+    if m.kind == "pvp" and seat is not None and not m.done:
+        m.forfeit(seat, "left")
+    else:
+        manager.remove(m.id)
+    return jsonify({"status": "left"})
 
-    return jsonify({
-        "state": session.env.get_full_state(),
-        "done": session.done,
-        "match_info": session.match_info if session.done else None,
-        "reward": float(reward),
-        "info": info,
-    })
 
-def _match_winner(info, a0_name, a1_name):
-    """0 / 1 / None (draw). A timeout with both alive counts as a loss for a PPO side."""
-    if info["p0_alive"] and not info["p1_alive"]:
-        return 0
-    if info["p1_alive"] and not info["p0_alive"]:
-        return 1
-    ppo0, ppo1 = a0_name == "ppo", a1_name == "ppo"
-    if ppo0 != ppo1:
-        return 1 if ppo0 else 0
-    if ppo0 and ppo1:
-        return None
-    if info["p0_health"] == info["p1_health"]:
-        return None
-    return 0 if info["p0_health"] > info["p1_health"] else 1
+@app.post("/api/queue/join")
+@login_required
+def queue_join():
+    map_id = (request.get_json(silent=True) or {}).get("map_id", "map1")
+    if map_id not in MAPS:
+        return jsonify({"error": "Unknown map."}), 400
+    return jsonify(manager.join_queue(g.user, map_id))
+
+
+@app.get("/api/queue/status")
+@login_required
+def queue_status():
+    return jsonify(manager.queue_status(g.user))
+
+
+@app.post("/api/queue/leave")
+@login_required
+def queue_leave():
+    manager.leave_queue(g.user)
+    return jsonify({"status": "left"})
 
 @app.route("/api/benchmark", methods=["POST"])
+@login_required
 def benchmark():
     data = request.json or {}
     a0_name = data.get("agent0", "ppo")
     a1_name = data.get("agent1", "rulebased")
-    n_episodes = min(int(data.get("episodes", 50)), 200)
+    n_episodes = max(1, min(int(data.get("episodes", 20)), int(os.environ.get("BENCH_MAX_EPISODES", 200))))
     map_id = data.get("map_id", "map1")
 
     map_cfg = MAPS[map_id]
@@ -241,7 +266,7 @@ def benchmark():
             done = term or trunc
 
         total_steps += info["step"]
-        w = _match_winner(info, a0_name, a1_name)
+        w = match_winner(info, a0_name, a1_name)
         results["agent0_wins" if w == 0 else "agent1_wins" if w == 1 else "draws"] += 1
 
     results["avg_steps"] = round(total_steps / n_episodes, 1)
@@ -251,7 +276,20 @@ def benchmark():
     results["agent1_name"] = a1_name
     return jsonify(results)
 
+DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+
+
+@app.get("/", defaults={"path": ""})
+@app.get("/<path:path>")
+def frontend(path):
+    if not os.path.isdir(DIST):
+        return jsonify({"error": "Frontend not built. Run `npm run build` in frontend/."}), 404
+    if path and os.path.isfile(os.path.join(DIST, path)):
+        return send_from_directory(DIST, path)
+    return send_from_directory(DIST, "index.html")
+
+
 if __name__ == "__main__":
     print("\n Mini Militia RL — API Server")
     print(" Running on http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False, threaded=True)
