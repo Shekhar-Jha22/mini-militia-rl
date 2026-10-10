@@ -235,3 +235,27 @@ button { font: inherit; }
 @media (max-width: 640px) {
   .result-actions .btn { font-size: 15px; padding: 7px 14px 9px; }
 }
+
+/* ── Touch controls ──────────────────────────────────────────────────── */
+body { touch-action: manipulation; }
+.touchpad {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  gap: 16px; margin: 18px auto 0; max-width: 520px; padding: 0 6px;
+  user-select: none; -webkit-user-select: none;
+}
+.stick-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.stick {
+  position: relative; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle, rgba(27,31,59,.25) 0%, rgba(27,31,59,.6) 100%);
+  border: 3px solid var(--ink);
+  box-shadow: inset 0 5px 0 rgba(0,0,0,.28), 0 5px 0 rgba(10,14,40,.5);
+  touch-action: none; -webkit-tap-highlight-color: transparent;
+}
+.stick-knob {
+  width: 46%; height: 46%; border-radius: 50%; border: 3px solid var(--ink);
+  background: linear-gradient(180deg, var(--blue-hi), var(--blue-lo));
+  box-shadow: inset 0 3px 0 rgba(255,255,255,.5), 0 4px 0 var(--ink);
+  pointer-events: none; transition: transform .04s linear;
+}
+.stick-knob.red { background: linear-gradient(180deg, var(--red-hi), var(--red-lo)); }
+.stick-label { font-size: 15px; text-shadow: 0 2px 0 var(--ink); }

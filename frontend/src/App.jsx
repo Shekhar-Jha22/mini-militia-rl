@@ -428,10 +428,14 @@ function WaitingScreen({ token, user, mapId, onMatched, onCancel, onAuthError })
 
 // ── Human controls ─────────────────────────────────────────────────────
 const MOVE_DIRS = [[0,0],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
+// Joystick angle sector (0=E, 1=SE, … 7=NE, screen y-down) → MOVE_DIRS index.
+const SECTOR_TO_MOVE = [3, 4, 5, 6, 7, 8, 1, 2];
+const IS_TOUCH = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches;
 const GAME_KEYS = new Set([" ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
 
 function useHumanControls(seat, stateRef, canvasRef) {
   const keysRef = useRef({});
+  const touchRef = useRef({ move: null, aim: null });
   const mouseRef = useRef({ wx: null, wy: null, fire: false });
   const lastAimRef = useRef(seat === 1 ? 8 : 0);
 
@@ -468,6 +472,11 @@ function useHumanControls(seat, stateRef, canvasRef) {
     for (let i = 1; i < MOVE_DIRS.length; i++) {
       if (MOVE_DIRS[i][0] === mx && MOVE_DIRS[i][1] === my) { moveDir = i; break; }
     }
+    const tm = touchRef.current.move;
+    if (tm) {
+      const sector = ((Math.round(Math.atan2(tm[1], tm[0]) / (Math.PI / 4)) % 8) + 8) % 8;
+      moveDir = SECTOR_TO_MOVE[sector];
+    }
 
     // AIM_ANGLES[i] = i·π/8 → 0=E, 4=S, 8=W, 12=N (y-down)
     let aimDir = lastAimRef.current;
@@ -484,6 +493,9 @@ function useHumanControls(seat, stateRef, canvasRef) {
       if (keys["i"] && keys["l"]) aimDir = 14;
       if (keys["k"] && keys["j"]) aimDir = 6;
       if (keys["k"] && keys["l"]) aimDir = 2;
+    } else if (touchRef.current.aim) {
+      const [ax, ay] = touchRef.current.aim;
+      aimDir = ((Math.round(Math.atan2(ay, ax) * 8 / Math.PI) % 16) + 16) % 16;
     } else if (mouse.wx !== null) {
       const me = stateRef.current?.players?.[seat];
       if (me && Number.isFinite(me.x)) {
@@ -493,7 +505,7 @@ function useHumanControls(seat, stateRef, canvasRef) {
     }
     lastAimRef.current = aimDir;
 
-    const shoot = keys[" "] || keys["f"] || mouse.fire ? 1 : 0;
+    const shoot = keys[" "] || keys["f"] || mouse.fire || touchRef.current.aim ? 1 : 0;
     return [moveDir, aimDir, shoot];
   }, [seat, stateRef]);
 
@@ -513,7 +525,9 @@ function useHumanControls(seat, stateRef, canvasRef) {
     onMouseUp: (e) => { if (e.button === 0) mouseRef.current.fire = false; },
   };
 
-  return { getAction, handlers };
+  const setTouch = useCallback((which, vec) => { touchRef.current[which] = vec; }, []);
+
+  return { getAction, handlers, setTouch };
 }
 
 // ── Game ───────────────────────────────────────────────────────────────
@@ -618,6 +632,48 @@ function PlayerBanner({ name, team, player, isYou, align = "left" }) {
   );
 }
 
+function Joystick({ label, team, onChange, size = 136 }) {
+  const baseRef = useRef(null);
+  const pointerRef = useRef(null);
+  const [knob, setKnob] = useState({ x: 0, y: 0 });
+
+  const move = (e) => {
+    const r = baseRef.current.getBoundingClientRect();
+    const radius = r.width / 2;
+    let dx = e.clientX - (r.left + radius), dy = e.clientY - (r.top + radius);
+    const d = Math.hypot(dx, dy);
+    if (d > radius) { dx = (dx / d) * radius; dy = (dy / d) * radius; }
+    setKnob({ x: dx, y: dy });
+    onChange(Math.hypot(dx, dy) / radius > 0.25 ? [dx / radius, dy / radius] : null);
+  };
+  const release = () => {
+    pointerRef.current = null;
+    setKnob({ x: 0, y: 0 });
+    onChange(null);
+  };
+
+  return (
+    <div className="stick-wrap">
+      <div ref={baseRef} className="stick" style={{ width: size, height: size }}
+        onPointerDown={(e) => { pointerRef.current = e.pointerId; try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ } move(e); }}
+        onPointerMove={(e) => { if (e.pointerId === pointerRef.current) move(e); }}
+        onPointerUp={release} onPointerCancel={release} onLostPointerCapture={release}>
+        <div className={`stick-knob ${team}`} style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }} />
+      </div>
+      <div className="display stick-label">{label}</div>
+    </div>
+  );
+}
+
+function TouchPad({ setTouch }) {
+  return (
+    <div className="touchpad">
+      <Joystick label="Move" team="blue" onChange={(v) => setTouch("move", v)} />
+      <Joystick label="Aim & fire" team="red" onChange={(v) => setTouch("aim", v)} />
+    </div>
+  );
+}
+
 function ControlsBar() {
   const Item = ({ keys, label }) => (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -649,7 +705,7 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
   const wsRef = useRef(null);
   const speedRef = useRef(speed);
   const liveRef = useRef({ matchId: null, done: false });
-  const { getAction, handlers } = useHumanControls(seat, stateRef, canvasRef);
+  const { getAction, handlers, setTouch } = useHumanControls(seat, stateRef, canvasRef);
 
   liveRef.current = { matchId, done: !!snap?.done };
 
@@ -857,7 +913,7 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
         {!result && <button className="btn red small" onClick={leave}>{seat == null ? "Stop watching" : "Surrender"}</button>}
       </div>
 
-      {seat != null && <ControlsBar />}
+      {seat != null && !result && (IS_TOUCH ? <TouchPad setTouch={setTouch} /> : <ControlsBar />)}
     </Page>
   );
 }
