@@ -69,7 +69,7 @@ function useLeaveOnExit(leaveRef) {
 // ── Layout ─────────────────────────────────────────────────────────────
 function TopBar({ user, onLogout, onHome }) {
   return (
-    <header style={{
+    <header className="topbar" style={{
       display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
       padding: "14px 22px", background: "linear-gradient(180deg, rgba(27,31,59,.55), rgba(27,31,59,.25))",
       borderBottom: "3px solid var(--ink)",
@@ -93,8 +93,8 @@ function TopBar({ user, onLogout, onHome }) {
   );
 }
 
-function Page({ children, width = 1100 }) {
-  return <main style={{ maxWidth: width, margin: "0 auto", padding: "26px 18px 60px" }}>{children}</main>;
+function Page({ children, width = 1100, className }) {
+  return <main className={className} style={{ maxWidth: width, margin: "0 auto", padding: "26px 18px 60px" }}>{children}</main>;
 }
 
 // ── Login ──────────────────────────────────────────────────────────────
@@ -579,7 +579,7 @@ function Board({ bufRef, mapId, seat, canvasRef, handlers, children }) {
   }, [mapId]);
 
   return (
-    <div style={{
+    <div className="board" style={{
       position: "relative", width: "100%", maxWidth: fit.cw + 12, margin: "0 auto",
       padding: 6, background: "linear-gradient(180deg, #8b5a2b, #5e3a1a)", border: "3px solid var(--ink)",
       borderRadius: 18, boxShadow: "inset 0 3px 0 rgba(255,255,255,.25), 0 8px 0 rgba(10,14,40,.55)",
@@ -615,16 +615,16 @@ function PlayerBanner({ name, team, player, isYou, align = "left" }) {
       flexDirection: right ? "row-reverse" : "row",
       background: `linear-gradient(180deg, var(--${team}-hi), var(--${team}-lo))`,
     }}>
-      <Avatar name={name} team={team} size={42} />
+      <div className="banner-avatar"><Avatar name={name} team={team} size={42} /></div>
       <div style={{ flex: 1, minWidth: 0, textAlign: right ? "right" : "left" }}>
-        <div className="display" style={{ fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textShadow: "0 2px 0 var(--ink)" }}>
+        <div className="display banner-name" style={{ fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textShadow: "0 2px 0 var(--ink)" }}>
           {name}{isYou && <span style={{ color: "var(--gold)" }}> (you)</span>}
         </div>
         <div className="hpbar" style={{ margin: "4px 0" }}>
           <div className={tone} style={{ width: `${hp}%`, marginLeft: right ? "auto" : 0 }} />
           <span>{hp}</span>
         </div>
-        <div style={{ display: "flex", gap: 2, justifyContent: right ? "flex-end" : "flex-start" }}>
+        <div className="banner-shells" style={{ display: "flex", gap: 2, justifyContent: right ? "flex-end" : "flex-start" }}>
           {Array.from({ length: 8 }).map((_, i) => <ShellIcon key={i} empty={i >= ammo} size={15} />)}
         </div>
       </div>
@@ -632,7 +632,7 @@ function PlayerBanner({ name, team, player, isYou, align = "left" }) {
   );
 }
 
-function Joystick({ label, team, onChange, size = 136 }) {
+function Joystick({ label, team, onChange }) {
   const baseRef = useRef(null);
   const pointerRef = useRef(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
@@ -654,22 +654,13 @@ function Joystick({ label, team, onChange, size = 136 }) {
 
   return (
     <div className="stick-wrap">
-      <div ref={baseRef} className="stick" style={{ width: size, height: size }}
+      <div ref={baseRef} className="stick"
         onPointerDown={(e) => { pointerRef.current = e.pointerId; try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic pointer */ } move(e); }}
         onPointerMove={(e) => { if (e.pointerId === pointerRef.current) move(e); }}
         onPointerUp={release} onPointerCancel={release} onLostPointerCapture={release}>
         <div className={`stick-knob ${team}`} style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }} />
       </div>
       <div className="display stick-label">{label}</div>
-    </div>
-  );
-}
-
-function TouchPad({ setTouch }) {
-  return (
-    <div className="touchpad">
-      <Joystick label="Move" team="blue" onChange={(v) => setTouch("move", v)} />
-      <Joystick label="Aim & fire" team="red" onChange={(v) => setTouch("aim", v)} />
     </div>
   );
 }
@@ -825,6 +816,11 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
     onExit();
   };
 
+  useEffect(() => {
+    document.body.classList.add("in-game");
+    return () => document.body.classList.remove("in-game");
+  }, []);
+
   const state = snap?.state;
   const players = snap?.players || [];
   const nameFor = (i) => {
@@ -847,15 +843,16 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
       : info.steps >= MAX_STEPS ? "Time ran out." : `Battle lasted ${(info.steps * TICK_MS / 1000).toFixed(0)} seconds.`;
   }
   const countdown = isPvp && snap && !snap.done && snap.starts_in > 0 ? Math.ceil(snap.starts_in) : null;
+  const sticks = seat != null && IS_TOUCH && !result;
   const secondsLeft = Math.max(0, Math.ceil(((MAX_STEPS - (state?.step || 0)) * TICK_MS) / 1000));
   const map = MAPS.find(m => m.id === config.mapId);
 
   return (
-    <Page width={900}>
+    <Page width={900} className="game-page">
       <div className="hud">
         <PlayerBanner name={nameFor(0)} team="blue" player={state?.players?.[0]} isYou={seat === 0} />
         <div className="panel cream clock" style={{ padding: "8px 16px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minWidth: 110 }}>
-          <div style={{ fontSize: 12, opacity: .7 }}>{map?.name}</div>
+          <div className="clock-map" style={{ fontSize: 12, opacity: .7 }}>{map?.name}</div>
           <div className="display" style={{ fontSize: 30, lineHeight: 1, color: secondsLeft <= 10 ? "var(--red-lo)" : "var(--ink)" }}>
             {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}
           </div>
@@ -863,6 +860,13 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
         <PlayerBanner name={nameFor(1)} team="red" player={state?.players?.[1]} isYou={seat === 1} align="right" />
       </div>
 
+      <div className={`game-main ${sticks ? "with-sticks" : ""}`}>
+        {sticks && (
+          <div className="side side-left">
+            <button className="btn red small" onClick={leave}>Surrender</button>
+            <Joystick label="Move" team="blue" onChange={(v) => setTouch("move", v)} />
+          </div>
+        )}
       <Board bufRef={bufRef} mapId={config.mapId} seat={seat} canvasRef={canvasRef} handlers={handlers}>
         {!state && (
           <Overlay dim={0.7}>
@@ -873,7 +877,7 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
         {countdown != null && (
           <Overlay>
             <div className="outlined" style={{ fontSize: 26 }}>{nameFor(0)} <span style={{ color: "var(--gold)" }}>vs</span> {nameFor(1)}</div>
-            <div key={countdown} className="outlined pop" style={{ fontSize: 120, lineHeight: 1.1, color: "var(--gold)" }}>{countdown}</div>
+            <div key={countdown} className="outlined pop countdown">{countdown}</div>
           </Overlay>
         )}
         {result && (
@@ -901,8 +905,14 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
           </div>
         )}
       </Board>
+        {sticks && (
+          <div className="side side-right">
+            <Joystick label="Aim & fire" team="red" onChange={(v) => setTouch("aim", v)} />
+          </div>
+        )}
+      </div>
 
-      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 14, marginTop: 18, flexWrap: "wrap" }}>
+      <div className="game-footer">
         {config.mode === "sim" && (
           <div className="segmented" style={{ width: 300 }}>
             {[[150, "Slow"], [80, "Normal"], [40, "Fast"]].map(([s, label]) => (
@@ -910,10 +920,10 @@ function GameScreen({ token, config, onExit, onRequeue, onAuthError }) {
             ))}
           </div>
         )}
-        {!result && <button className="btn red small" onClick={leave}>{seat == null ? "Stop watching" : "Surrender"}</button>}
+        {!result && !sticks && <button className="btn red small" onClick={leave}>{seat == null ? "Stop watching" : "Surrender"}</button>}
       </div>
 
-      {seat != null && !result && (IS_TOUCH ? <TouchPad setTouch={setTouch} /> : <ControlsBar />)}
+      {seat != null && !result && !IS_TOUCH && <ControlsBar />}
     </Page>
   );
 }
